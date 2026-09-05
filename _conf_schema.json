@@ -1,0 +1,451 @@
+{
+  "endpoint": {
+    "type": "object",
+    "description": "图床实例",
+    "hint": "CloudFlare-ImgBed 站点地址与鉴权。至少要填 base_url，否则插件只会提示未配置。",
+    "items": {
+      "base_url": {
+        "type": "string",
+        "description": "图床根地址",
+        "hint": "例如 https://img.example.com，不要带结尾斜杠、不要带 /upload。只填域名时自动按 https 补全。",
+        "default": ""
+      },
+      "auth_mode": {
+        "type": "string",
+        "description": "鉴权方式",
+        "hint": "token 走 Authorization: Bearer（推荐，可在图床后台单独签发仅含 upload/delete/list 权限的 API Token）；auth_code 走 URL 参数 authCode；none 适用于完全公开的自建实例。填了凭据但选错模式时插件会自动纠正。",
+        "options": ["token", "auth_code", "none"],
+        "default": "token"
+      },
+      "api_token": {
+        "type": "string",
+        "description": "API Token",
+        "hint": "图床后台「API Token」签发的凭据。等同于上传与删除权限，请勿写进聊天记录或公开仓库。",
+        "is_sensitive": true,
+        "default": ""
+      },
+      "auth_code": {
+        "type": "string",
+        "description": "authCode 认证码",
+        "hint": "图床环境变量 AUTH_CODE 的值。同样属于敏感凭据。",
+        "is_sensitive": true,
+        "default": ""
+      },
+      "upload_channel": {
+        "type": "string",
+        "description": "上传渠道",
+        "hint": "HuggingFace Storage Buckets 方案请选 s3（该后端走 S3 兼容协议）。",
+        "options": ["s3", "cfr2", "telegram", "discord", "huggingface", "webdav", "external"],
+        "default": "s3"
+      },
+      "channel_name": {
+        "type": "string",
+        "description": "渠道名称",
+        "hint": "图床后台里该渠道的名字，用于在多个同类渠道之间选择。cloudflare-imgbed-hf-buckets 方案默认填 HF-Buckets。留空表示由图床自行决定。",
+        "default": ""
+      },
+      "name_type": {
+        "type": "string",
+        "description": "默认命名方式",
+        "hint": "default 前缀时间戳；index 命名冲突时追加序号；origin 保留原始文件名；short 使用短链。单次上传可用 -n 覆盖。",
+        "options": ["default", "index", "origin", "short"],
+        "default": "default"
+      },
+      "server_compress": {
+        "type": "bool",
+        "description": "允许图床服务端压缩",
+        "hint": "对应上传参数 serverCompress。关闭则请求图床保留原图。与本插件的本地压缩是两套独立机制。",
+        "default": true
+      },
+      "auto_retry": {
+        "type": "bool",
+        "description": "允许图床切换渠道重试",
+        "hint": "对应上传参数 autoRetry。开启后指定渠道失败时图床会尝试其它可用渠道。",
+        "default": true
+      },
+      "public_url_prefix": {
+        "type": "string",
+        "description": "自定义外链前缀",
+        "hint": "填了就用它拼最终链接，适合图床挂了 CDN 或自定义域名的场景。例如 https://cdn.example.com。留空则用 base_url。",
+        "default": ""
+      },
+      "prefer_public_url": {
+        "type": "bool",
+        "description": "优先使用响应里的 publicUrl",
+        "hint": "图床返回 publicUrl 时直接采用；关闭则一律用 base_url 拼 src。",
+        "default": true
+      },
+      "timeout_seconds": {
+        "type": "float",
+        "description": "单次请求超时（秒）",
+        "hint": "同时作用于图床请求与外链素材下载。大文件走慢速线路时可以调高。",
+        "default": 180.0,
+        "slider": {"min": 10, "max": 900, "step": 10}
+      },
+      "verify_ssl": {
+        "type": "bool",
+        "description": "校验 TLS 证书",
+        "hint": "仅在自签名证书的内网实例上关闭。关闭后图床请求与素材直链下载都不再校验证书，存在中间人风险。",
+        "default": true
+      }
+    }
+  },
+  "upload": {
+    "type": "object",
+    "description": "上传行为",
+    "hint": "目录模板、并发、体积上限、扩展名策略与外链转存。",
+    "items": {
+      "folder_template": {
+        "type": "string",
+        "description": "上传目录模板",
+        "hint": "支持变量 {date} {datetime} {yyyy} {mm} {dd} {group} {sender} {platform} {type} {ext}。留空表示上传到根目录。示例：astrbot/{date} 或 qq/{group}/{yyyy}{mm}。",
+        "default": "astrbot/{date}"
+      },
+      "max_file_mb": {
+        "type": "float",
+        "description": "单文件上限（MB）",
+        "hint": "超过就直接跳过，不会浪费图床流量。压缩包内的单个文件同样受此限制。",
+        "default": 20.0,
+        "slider": {"min": 1, "max": 512, "step": 1}
+      },
+      "max_total_mb": {
+        "type": "float",
+        "description": "单次任务总量上限（MB）",
+        "hint": "累计到上限后剩余文件会被截断并在结果里说明。",
+        "default": 200.0,
+        "slider": {"min": 1, "max": 2048, "step": 10}
+      },
+      "max_files": {
+        "type": "int",
+        "description": "单次任务文件数上限",
+        "hint": "压缩包展开后的条目一并计入。",
+        "default": 30,
+        "slider": {"min": 1, "max": 500, "step": 1}
+      },
+      "concurrency": {
+        "type": "int",
+        "description": "并发上传数",
+        "hint": "调高更快，但图床与 S3 后端都可能限速。自建小实例建议 2–4。",
+        "default": 3,
+        "slider": {"min": 1, "max": 16, "step": 1}
+      },
+      "enforce_extension_whitelist": {
+        "type": "bool",
+        "description": "本地先行校验扩展名白名单",
+        "hint": "白名单与图床服务端 isExtValid() 保持一致，可以避免把注定被拒的文件传上去。关闭后一切交给服务端判断。",
+        "default": true
+      },
+      "extra_allowed_extensions": {
+        "type": "list",
+        "description": "额外允许的扩展名",
+        "hint": "只在你的图床改过服务端白名单时才需要填。写不带点的小写形式，如 heic、avif。",
+        "default": []
+      },
+      "blocked_extensions": {
+        "type": "list",
+        "description": "禁止上传的扩展名",
+        "hint": "优先级高于白名单，适合屏蔽 exe、msi、apk 这类可执行文件。",
+        "default": []
+      },
+      "retry_times": {
+        "type": "int",
+        "description": "失败重试次数",
+        "hint": "只对超时、限流、5xx 这类可恢复错误重试；鉴权失败与扩展名被拒不会重试。",
+        "default": 2,
+        "slider": {"min": 0, "max": 6, "step": 1}
+      },
+      "retry_backoff_seconds": {
+        "type": "float",
+        "description": "重试退避基数（秒）",
+        "hint": "第 n 次重试等待 基数 × n 秒。",
+        "default": 1.5,
+        "slider": {"min": 0, "max": 30, "step": 0.5}
+      },
+      "allow_url_ingest": {
+        "type": "bool",
+        "description": "允许把外链下载后转存到图床",
+        "hint": "存在 SSRF 风险：模型或用户给出的链接会由部署机器发起请求。插件已强制拦掉回环、私有网段、链路本地与保留地址，但 DNS rebinding 等残余风险仍在。开启时务必配合下面的白名单。",
+        "default": false
+      },
+      "url_ingest_allowlist": {
+        "type": "list",
+        "description": "外链转存域名白名单",
+        "hint": "只填域名后缀，如 example.com、i.pximg.net，会同时匹配其子域。留空表示不限制域名（仅保留内网拦截），强烈建议填写。",
+        "default": []
+      }
+    }
+  },  "compress": {
+    "type": "object",
+    "description": "本地压缩",
+    "hint": "上传前在本机把大图重编码，省图床空间也省带宽。需要 Pillow。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用上传前本地压缩",
+        "hint": "只处理图片；单次上传可用「原图」关键字临时跳过。",
+        "default": true
+      },
+      "trigger_mb": {
+        "type": "float",
+        "description": "压缩触发阈值（MB）",
+        "hint": "小于该体积的图片直接原样上传。设很小会让所有图片都被重编码。",
+        "default": 4.0,
+        "slider": {"min": 0.1, "max": 64, "step": 0.1}
+      },
+      "max_edge": {
+        "type": "int",
+        "description": "最长边上限（像素）",
+        "hint": "超过则等比缩放。想只做重编码不缩放，把它调到很大即可。",
+        "default": 4096,
+        "slider": {"min": 512, "max": 16384, "step": 128}
+      },
+      "quality": {
+        "type": "int",
+        "description": "重编码质量",
+        "hint": "webp / jpeg 的质量参数。85 左右是肉眼几乎无损的常用值。",
+        "default": 86,
+        "slider": {"min": 40, "max": 100, "step": 1}
+      },
+      "target_format": {
+        "type": "string",
+        "description": "压缩输出格式",
+        "hint": "webp 体积最小；jpeg 兼容性最好但不支持透明；keep 表示沿用原格式只做缩放与重编码。",
+        "options": ["webp", "jpeg", "keep"],
+        "default": "webp"
+      },
+      "keep_transparency": {
+        "type": "bool",
+        "description": "保留透明通道",
+        "hint": "开启时带 alpha 的图片不会被转成 jpeg，避免透明区域变黑。",
+        "default": true
+      },
+      "skip_gif": {
+        "type": "bool",
+        "description": "跳过 GIF",
+        "hint": "避免动图被压成单帧。",
+        "default": true
+      }
+    }
+  },
+  "archive": {
+    "type": "object",
+    "description": "压缩包解压上传",
+    "hint": "把压缩包里的文件逐个上传。解压内容属于不可信输入，相关上限请勿随意放开。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用解压上传",
+        "hint": "支持 zip；tar/tar.gz/tar.bz2/tar.xz 内置支持；rar 需要 rarfile + unrar，7z 需要 py7zr，缺依赖时会明确报错。",
+        "default": true
+      },
+      "default_extract": {
+        "type": "bool",
+        "description": "默认对压缩包解压",
+        "hint": "关闭则默认把压缩包本体当普通文件上传，需要解压时在指令里加「解压」。",
+        "default": true
+      },
+      "max_entries": {
+        "type": "int",
+        "description": "单个压缩包最多取多少条目",
+        "hint": "超出部分会被截断并在结果里提示。",
+        "default": 200,
+        "slider": {"min": 1, "max": 2000, "step": 1}
+      },
+      "max_total_mb": {
+        "type": "float",
+        "description": "解压后总大小上限（MB）",
+        "hint": "解压炸弹防护之一。该值同时也是压缩包本体的下载上限。",
+        "default": 500.0,
+        "slider": {"min": 1, "max": 2048, "step": 10}
+      },
+      "max_ratio": {
+        "type": "float",
+        "description": "最大解压膨胀比",
+        "hint": "解压后总大小 ÷ 压缩包大小超过该倍数就中止，防解压炸弹。纯文本压缩包本身膨胀比就高，误报时适当调高。",
+        "default": 120.0,
+        "slider": {"min": 2, "max": 1000, "step": 1}
+      },
+      "password": {
+        "type": "string",
+        "description": "解压密码",
+        "hint": "全局固定密码，只适合固定来源的场景。",
+        "is_sensitive": true,
+        "default": ""
+      },
+      "flatten_names": {
+        "type": "bool",
+        "description": "压平压缩包内目录结构",
+        "hint": "关闭则保留包内目录层级，拼接在上传目录之后；开启则所有文件平铺到同一层。",
+        "default": false
+      },
+      "upload_archive_when_disabled": {
+        "type": "bool",
+        "description": "不解压时仍上传压缩包本体",
+        "hint": "关闭则在不解压的情况下直接跳过压缩包。",
+        "default": true
+      }
+    }
+  },
+  "behavior": {
+    "type": "object",
+    "description": "回显与记忆",
+    "hint": "链接格式、合并转发、去重缓存、上传记录与会话素材。",
+    "items": {
+      "output_format": {
+        "type": "string",
+        "description": "默认链接格式",
+        "hint": "plain 纯链接；markdown 输出 ![](url)；html 输出 img 标签；bbcode 输出 [img]。单次上传可用 -o 或「格式=」覆盖。",
+        "options": ["plain", "markdown", "html", "bbcode"],
+        "default": "markdown"
+      },
+      "forward_threshold": {
+        "type": "int",
+        "description": "合并转发阈值（条）",
+        "hint": "结果条数达到该值时改用合并转发，避免刷屏。目前只有 aiocqhttp（QQ）平台支持，其它平台自动退回长文本。设为 0 表示从不使用合并转发。",
+        "default": 5,
+        "slider": {"min": 0, "max": 100, "step": 1}
+      },
+      "show_size": {
+        "type": "bool",
+        "description": "结果里显示文件体积",
+        "default": true
+      },
+      "dedupe_enabled": {
+        "type": "bool",
+        "description": "启用 sha256 去重",
+        "hint": "内容相同的文件直接复用已有链接，不再重复上传，省图床空间。同一批里的重复文件也只上传一次。",
+        "default": true
+      },
+      "dedupe_ttl_days": {
+        "type": "int",
+        "description": "去重缓存有效期（天）",
+        "hint": "超期记录视为失效并重新上传，避免图床那边已删掉却仍返回死链。0 表示永不过期。",
+        "default": 30,
+        "slider": {"min": 0, "max": 365, "step": 1}
+      },
+      "dedupe_max_entries": {
+        "type": "int",
+        "description": "去重缓存最多条数",
+        "hint": "超出后按写入顺序淘汰最旧的记录。",
+        "default": 500,
+        "slider": {"min": 16, "max": 5000, "step": 16}
+      },
+      "record_limit": {
+        "type": "int",
+        "description": "保留最近上传记录条数",
+        "hint": "供 /图床记录 与 imgbed_recent_uploads 工具查询。0 表示不记录。",
+        "default": 50,
+        "slider": {"min": 0, "max": 500, "step": 5}
+      },
+      "session_material_limit": {
+        "type": "int",
+        "description": "每个会话缓存的素材条数",
+        "hint": "缓存最近出现过的图片与文件，让「把刚才那张图传一下」这类说法能命中。",
+        "default": 40,
+        "slider": {"min": 1, "max": 200, "step": 1}
+      },
+      "session_ttl_minutes": {
+        "type": "int",
+        "description": "会话素材有效期（分钟）",
+        "hint": "过期素材不再参与选取。QQ 图片直链本身有时效，设太长会拿到过期链接。",
+        "default": 180,
+        "slider": {"min": 5, "max": 1440, "step": 5}
+      },
+      "reply_with_image_preview": {
+        "type": "bool",
+        "description": "结果附带图片预览",
+        "hint": "上传成功后额外把图片发回会话，方便肉眼确认链接可用。最多预览 9 张。",
+        "default": false
+      }
+    }
+  },  "permission": {
+    "type": "object",
+    "description": "权限与配额",
+    "hint": "谁能用、能用哪些工具、每天能传多少。图床空间是公共资源，群聊场景建议按需收紧。",
+    "items": {
+      "llm_tools_enabled": {
+        "type": "bool",
+        "description": "启用 LLM 工具",
+        "hint": "总开关。关闭后模型完全看不到本插件的工具，只剩指令可用。",
+        "default": true
+      },
+      "upload_tool_enabled": {
+        "type": "bool",
+        "description": "启用上传工具 imgbed_upload",
+        "default": true
+      },
+      "list_tool_enabled": {
+        "type": "bool",
+        "description": "启用素材列举工具 imgbed_list_materials",
+        "hint": "让模型先看清当前会话有哪些图片与文件，再决定传哪几个。",
+        "default": true
+      },
+      "delete_tool_enabled": {
+        "type": "bool",
+        "description": "启用删除工具 imgbed_delete",
+        "hint": "默认关闭。删除不可撤销，开启前请确认确实需要让模型自主删图。",
+        "default": false
+      },
+      "quota_tool_enabled": {
+        "type": "bool",
+        "description": "启用配额查询工具 imgbed_quota",
+        "default": true
+      },
+      "records_tool_enabled": {
+        "type": "bool",
+        "description": "启用最近上传查询工具 imgbed_recent_uploads",
+        "default": true
+      },
+      "group_whitelist": {
+        "type": "list",
+        "description": "群聊白名单",
+        "hint": "填了就只有这些群能用。私聊不受影响。",
+        "default": []
+      },
+      "group_blacklist": {
+        "type": "list",
+        "description": "群聊黑名单",
+        "hint": "优先级高于白名单。",
+        "default": []
+      },
+      "user_blacklist": {
+        "type": "list",
+        "description": "用户黑名单",
+        "hint": "填平台用户 ID。",
+        "default": []
+      },
+      "admin_only": {
+        "type": "bool",
+        "description": "仅管理员可用",
+        "hint": "开启后普通用户既不能用指令也不能触发 LLM 工具。",
+        "default": false
+      },
+      "delete_requires_admin": {
+        "type": "bool",
+        "description": "删除操作要求管理员",
+        "hint": "即使开启了删除工具，非管理员触发时也会被拒。建议保持开启。",
+        "default": true
+      },
+      "daily_quota_per_user": {
+        "type": "int",
+        "description": "每人每日上传文件数上限",
+        "hint": "0 表示不限制。命中去重复用的文件不计数，管理员不受限制。",
+        "default": 0,
+        "slider": {"min": 0, "max": 1000, "step": 5}
+      },
+      "daily_quota_per_group": {
+        "type": "int",
+        "description": "每群每日上传文件数上限",
+        "hint": "0 表示不限制。",
+        "default": 0,
+        "slider": {"min": 0, "max": 5000, "step": 10}
+      }
+    }
+  },
+  "debug": {
+    "type": "bool",
+    "description": "输出调试日志",
+    "hint": "打印素材提取、目录渲染、重试与响应解析的细节，排查问题时再开。日志不含 Token 与认证码。",
+    "default": false
+  }
+}
