@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="图床摆渡：云端上传与批量图片">
+  <title>图床摆渡 / astrbot_plugin_imgbed_ferry</title>
+  <defs>
+    <linearGradient id="plate" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="512">
+      <stop offset="0" stop-color="#3A2352"/>
+      <stop offset="1" stop-color="#170F26"/>
+    </linearGradient>
+    <linearGradient id="cloud" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="512">
+      <stop offset="0" stop-color="#FFD642"/>
+      <stop offset="1" stop-color="#F07A18"/>
+    </linearGradient>
+    <clipPath id="plateClip">
+      <rect x="0" y="0" width="512" height="512" rx="120.32" ry="120.32"/>
+    </clipPath>
+    <clipPath id="frontClip">
+      <rect x="190.46" y="313.34" width="131.07" height="130.05" rx="23.04" ry="23.04"/>
+    </clipPath>
+    <filter id="soften" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="30.72"/>
+    </filter>
+    <mask id="cloudMask">
+      <g fill="#ffffff">
+        <circle cx="252.42" cy="194.56" r="76.80"/>
+        <circle cx="178.18" cy="220.16" r="51.20"/>
+        <circle cx="331.78" cy="212.48" r="58.88"/>
+        <rect x="126.98" y="222.72" width="258.56" height="48.64" rx="24.58" ry="24.58"/>
+      </g>
+      <g fill="#000000">
+        <path d="M256.00 139.26 L203.78 193.54 L308.22 193.54 Z"/>
+        <rect x="232.45" y="183.30" width="47.10" height="76.80" rx="8.19" ry="8.19"/>
+      </g>
+    </mask>
+  </defs>
+
+  <rect x="0" y="0" width="512" height="512" rx="120.32" ry="120.32" fill="url(#plate)"/>
+
+  <g clip-path="url(#plateClip)">
+    <ellipse cx="120.32" cy="51.20" rx="248.32" ry="230.40" fill="#8C6EBE" opacity="0.275" filter="url(#soften)"/>
+  </g>
+
+  <rect x="105.47" y="344.06" width="104.45" height="94.21" rx="19.46" ry="19.46"
+        fill="#FAF0D6" opacity="0.667" transform="rotate(-14 157.70 391.17)"/>
+  <rect x="302.08" y="344.06" width="104.45" height="94.21" rx="19.46" ry="19.46"
+        fill="#FAF0D6" opacity="0.667" transform="rotate(14 354.30 391.17)"/>
+
+  <rect x="190.46" y="313.34" width="131.07" height="130.05" rx="23.04" ry="23.04" fill="#FAF0D6"/>
+  <g clip-path="url(#frontClip)">
+    <circle cx="289.79" cy="347.65" r="14.85" fill="#F6821F"/>
+    <path d="M284.67 412.67 L314.37 372.22 L339.97 412.67 Z" fill="#281A3C" opacity="0.863"/>
+    <path d="M198.66 412.67 L244.74 351.23 L290.82 412.67 Z" fill="#281A3C"/>
+  </g>
+
+  <rect x="0" y="0" width="512" height="512" fill="url(#cloud)" mask="url(#cloudMask)"/>
+
+  <rect x="6.14" y="6.14" width="499.71" height="499.71" rx="115.20" ry="115.20"
+        fill="none" stroke="#FFE296" stroke-width="5.12" opacity="0.204"/>
+</svg>

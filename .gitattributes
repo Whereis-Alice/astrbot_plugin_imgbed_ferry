@@ -1,0 +1,12 @@
+# 统一行尾，避免 Windows/Linux 之间反复出现整文件 diff
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.7z binary
+*.rar binary
