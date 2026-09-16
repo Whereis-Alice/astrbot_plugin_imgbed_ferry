@@ -2,7 +2,7 @@ name: astrbot_plugin_imgbed_ferry
 display_name: 图床摆渡
 short_desc: 一句话把图片、文件和压缩包摆渡进 CloudFlare-ImgBed，自动去重、压缩、解压并回直链。
 desc: 让 Bot 自己把聊天里的图片、文件、引用附件甚至压缩包送上 CloudFlare-ImgBed 图床并回直链；支持批量上传、压缩包解压后逐个上传、sha256 去重省空间、图片预压缩、目录模板、并发重试、每日配额与合并转发回执，并顺手修掉 OneBot 适配器丢文件段的老问题，对 LLOneBot / SnowLuma 做了专门适配。
-version: v1.0.0
+version: v1.1.0
 author: Whereis-Alice
 repo: https://github.com/Whereis-Alice/astrbot_plugin_imgbed_ferry
 astrbot_version: ">=4.16,<5"

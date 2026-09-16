@@ -295,15 +295,18 @@ class ImgBedClient:
         json_body: Any = None,
         file_part: FilePart | None = None,
         with_auth_query: bool = False,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> RawResponse:
         query: dict[str, Any] = dict(params or {})
         if with_auth_query:
             query.update(self.auth_query())
+        headers = self.auth_headers()
+        headers.update({str(key): str(value) for key, value in (extra_headers or {}).items()})
         return await self._transport(
             method,
             self.build_url(path),
             params=query,
-            headers=self.auth_headers(),
+            headers=headers,
             json_body=json_body,
             file_part=file_part,
             timeout=self.endpoint.timeout_seconds,
@@ -358,13 +361,20 @@ class ImgBedClient:
         content_type: str = "application/octet-stream",
         folder: str = "",
         name_type: str = "",
+        idempotency_key: str = "",
     ) -> UploadOutcome:
+        extra_headers = {}
+        if str(idempotency_key or "").strip():
+            # 重试、并发协调和服务端支持幂等时都使用同一个稳定键；键本身不含
+            # token / authCode 或原始本地路径。
+            extra_headers["Idempotency-Key"] = str(idempotency_key).strip()
         response = await self._request(
             "POST",
             "/upload",
             params=self.upload_params(folder=folder, name_type=name_type),
             file_part=FilePart(UPLOAD_FIELD_NAME, filename, data, content_type),
             with_auth_query=False,
+            extra_headers=extra_headers,
         )
         self._ensure_ok(response, action="上传")
         return parse_upload_response(self._json_or_raise(response, action="上传"))

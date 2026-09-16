@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import hashlib
 import io
 import tempfile
 import unittest
@@ -82,14 +84,17 @@ class FakeClient:
         content_type: str = "application/octet-stream",
         folder: str = "",
         name_type: str = "",
+        idempotency_key: str = "",
     ) -> UploadOutcome:
         self.calls.append(
             {
                 "filename": filename,
+                "data": data,
                 "size": len(data),
                 "content_type": content_type,
                 "folder": folder,
                 "name_type": name_type,
+                "idempotency_key": idempotency_key,
             }
         )
         item = self.results.pop(0) if self.results else None
@@ -741,6 +746,98 @@ class UploadMaterialsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.items[0].url, first.items[0].url)
         self.assertEqual(len(await store.recent(10)), 2)
 
+    async def test_same_content_in_different_folders_is_not_reused(self) -> None:
+        store = FerryStore(SimpleNamespace())
+        svc, client, _ = make_service(store=store)
+        await svc.upload_materials(None, [inline("a.txt", b"same body")], folder="first")
+        second = await svc.upload_materials(None, [inline("b.txt", b"same body")], folder="second")
+        self.assertEqual(len(client.calls), 2)
+        self.assertFalse(second.items[0].reused)
+        self.assertNotEqual(client.folders[0], client.folders[1])
+
+    async def test_same_content_with_different_compression_mode_is_not_reused(self) -> None:
+        store = FerryStore(SimpleNamespace())
+        svc, client, _ = make_service(store=store)
+        await svc.upload_materials(None, [inline("a.txt", b"same body")], folder="wall")
+        second = await svc.upload_materials(
+            None,
+            [inline("b.txt", b"same body")],
+            folder="wall",
+            compress=False,
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertFalse(second.items[0].reused)
+
+    async def test_same_content_with_different_endpoint_is_not_reused(self) -> None:
+        store = FerryStore(SimpleNamespace())
+        first_service, first_client, _ = make_service(store=store)
+        await first_service.upload_materials(None, [inline("a.txt", b"same body")], folder="wall")
+        second_service, second_client, _ = make_service(
+            make_config(endpoint={"channel_name": "another-channel"}), store=store
+        )
+        second = await second_service.upload_materials(
+            None, [inline("b.txt", b"same body")], folder="wall"
+        )
+        self.assertEqual(len(first_client.calls), 1)
+        self.assertEqual(len(second_client.calls), 1)
+        self.assertFalse(second.items[0].reused)
+
+    async def test_digest_is_for_final_uploaded_bytes(self) -> None:
+        svc, client, _ = make_service(
+            make_config(compress={"enabled": False, "max_edge": 100, "quality": 60})
+        )
+        original = noise_png()
+        report = await svc.upload_materials(
+            None, [inline("noise.png", original, kind=KIND_IMAGE)], folder="wall", compress=True
+        )
+        self.assertEqual(
+            report.items[0].digest, hashlib.sha256(client.calls[0]["data"]).hexdigest()
+        )
+
+    async def test_concurrent_same_fingerprint_sends_one_request(self) -> None:
+        class BlockingClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def upload(self, **kwargs: Any) -> UploadOutcome:
+                self.calls.append(
+                    {
+                        "filename": kwargs["filename"],
+                        "data": kwargs["data"],
+                        "size": len(kwargs["data"]),
+                        "content_type": kwargs.get("content_type", ""),
+                        "folder": kwargs.get("folder", ""),
+                        "name_type": kwargs.get("name_type", ""),
+                        "idempotency_key": kwargs.get("idempotency_key", ""),
+                    }
+                )
+                self.started.set()
+                await self.release.wait()
+                return UploadOutcome(
+                    src=f"/file/{kwargs['folder']}/{kwargs['filename']}",
+                    public_url=f"https://cdn.example.com/file/{kwargs['folder']}/{kwargs['filename']}",
+                    file_id=f"fid-{kwargs['filename']}",
+                )
+
+        client = BlockingClient()
+        svc, _, _ = make_service(make_config(upload={"concurrency": 4}), client=client)
+        task = asyncio.create_task(
+            svc.upload_materials(
+                None,
+                [inline("a.txt", b"same body"), inline("b.txt", b"same body")],
+                folder="wall",
+            )
+        )
+        await client.started.wait()
+        await asyncio.sleep(0)
+        self.assertEqual(len(client.calls), 1)
+        client.release.set()
+        report = await task
+        self.assertEqual(len(report.items), 2)
+        self.assertTrue(report.items[1].reused)
+
     async def test_dedupe_can_be_switched_off(self) -> None:
         store = FerryStore(SimpleNamespace(), BehaviorConfig(dedupe_enabled=False))
         svc, client, _ = make_service(store=store)
@@ -896,14 +993,15 @@ class ArchiveExpansionTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report.truncated)
         self.assertEqual(len(report.items), 1)
 
-    async def test_duplicate_members_are_deduped(self) -> None:
+    async def test_duplicate_members_in_different_directories_are_isolated(self) -> None:
         svc, client, _ = make_service()
         data = make_zip({"a.txt": b"same", "sub/b.txt": b"same"})
         report = await svc.upload_materials(None, [inline("x.zip", data)], folder="wall")
-        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(len(client.calls), 2)
         self.assertEqual(len(report.items), 2)
-        self.assertTrue(report.items[1].reused)
+        self.assertFalse(report.items[1].reused)
         self.assertEqual(report.items[1].archive, "x.zip")
+        self.assertNotEqual(client.folders[0], client.folders[1])
 
 
 class FailureClassificationTest(unittest.IsolatedAsyncioTestCase):
@@ -1002,6 +1100,15 @@ class RetryTest(unittest.IsolatedAsyncioTestCase):
             report = await svc.upload_materials(None, [inline("a.txt", b"hello")], folder="wall")
         self.assertEqual([call.args[0] for call in sleep.await_args_list], [1.5, 3.0])
         self.assertEqual(len(report.failures), 1)
+
+    async def test_retries_reuse_the_same_idempotency_key(self) -> None:
+        client = FakeClient([ImgBedError("网络炸了", kind="network"), None])
+        svc = self._service(client, retry_times=1)
+        report = await svc.upload_materials(None, [inline("a.txt", b"hello")], folder="wall")
+        self.assertTrue(report.ok)
+        self.assertEqual(len(client.calls), 2)
+        self.assertTrue(client.calls[0]["idempotency_key"])
+        self.assertEqual(client.calls[0]["idempotency_key"], client.calls[1]["idempotency_key"])
 
 
 class CompressionTest(unittest.IsolatedAsyncioTestCase):

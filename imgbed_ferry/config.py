@@ -548,6 +548,39 @@ class PermissionConfig:
 
 
 @dataclass(slots=True)
+class IntegrationConfig:
+    """跨插件资源句柄接口的安全边界。
+
+    这个分组只影响公开的 ``upload_asset`` 接口，不会改变消息附件和
+    ``imgbed_upload`` 工具的行为。默认只信任 meme_magpie 签发的短期图片句柄，
+    避免把它误用成一个「给任意本地路径上传」的通用入口。
+    """
+
+    enabled: bool = True
+    allowed_asset_sources: list[str] = field(default_factory=lambda: ["astrbot_plugin_meme_magpie"])
+    max_handle_ttl_seconds: int = 1800
+    require_declared_hash: bool = True
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> IntegrationConfig:
+        sources = [
+            item.strip() for item in as_str_list(raw.get("allowed_asset_sources")) if item.strip()
+        ]
+        # 空列表通常是 Dashboard 用户清空了输入；这里回落到安全默认值，
+        # 不让「误清空」变成接受任意来源的隐式开关。
+        if not sources:
+            sources = ["astrbot_plugin_meme_magpie"]
+        return cls(
+            enabled=as_bool(raw.get("enabled"), True),
+            allowed_asset_sources=sources,
+            max_handle_ttl_seconds=as_int(
+                raw.get("max_handle_ttl_seconds"), 1800, minimum=30, maximum=86400
+            ),
+            require_declared_hash=as_bool(raw.get("require_declared_hash"), True),
+        )
+
+
+@dataclass(slots=True)
 class FerryConfig:
     """插件的全部配置。"""
 
@@ -557,6 +590,7 @@ class FerryConfig:
     archive: ArchiveConfig = field(default_factory=ArchiveConfig)
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
+    integration: IntegrationConfig = field(default_factory=IntegrationConfig)
     debug: bool = False
 
     @classmethod
@@ -569,5 +603,6 @@ class FerryConfig:
             archive=ArchiveConfig.from_mapping(section(data, "archive")),
             behavior=BehaviorConfig.from_mapping(section(data, "behavior")),
             permission=PermissionConfig.from_mapping(section(data, "permission")),
+            integration=IntegrationConfig.from_mapping(section(data, "integration")),
             debug=as_bool(data.get("debug"), False),
         )

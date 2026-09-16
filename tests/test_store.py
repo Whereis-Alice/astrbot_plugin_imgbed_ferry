@@ -74,6 +74,26 @@ class DedupeTest(unittest.IsolatedAsyncioTestCase):
         store = FerryStore(FakeOwner())
         self.assertIsNone(await store.lookup("nope"))
 
+    async def test_fingerprint_separates_same_digest_contexts(self) -> None:
+        store = FerryStore(FakeOwner())
+        await store.remember("d1", fingerprint="ctx-a", url="https://cdn/a.png")
+        await store.remember("d1", fingerprint="ctx-b", url="https://cdn/b.png")
+        self.assertEqual(
+            (await store.lookup("d1", fingerprint="ctx-a"))["url"], "https://cdn/a.png"
+        )
+        self.assertEqual(
+            (await store.lookup("d1", fingerprint="ctx-b"))["url"], "https://cdn/b.png"
+        )
+        self.assertIsNone(await store.lookup("d1", fingerprint="ctx-c"))
+
+    async def test_drop_by_digest_removes_all_fingerprints(self) -> None:
+        store = FerryStore(FakeOwner())
+        await store.remember("d1", fingerprint="ctx-a", url="https://cdn/a.png")
+        await store.remember("d1", fingerprint="ctx-b", url="https://cdn/b.png")
+        await store.drop("d1")
+        self.assertIsNone(await store.lookup("d1", fingerprint="ctx-a"))
+        self.assertIsNone(await store.lookup("d1", fingerprint="ctx-b"))
+
     async def test_blank_digest(self) -> None:
         store = FerryStore(FakeOwner())
         self.assertIsNone(await store.lookup(""))

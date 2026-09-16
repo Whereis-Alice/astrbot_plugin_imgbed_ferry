@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -25,21 +26,23 @@ from .imgbed_ferry.collector import (
 from .imgbed_ferry.config import FerryConfig
 from .imgbed_ferry.formatting import (
     format_item,
+    format_link,
     format_results,
     format_urls,
     normalize_style,
     summary_line,
 )
+from .imgbed_ferry.integration import AssetValidationError, parse_asset_handle
 from .imgbed_ferry.media import human_size, is_image_extension, split_extension
 from .imgbed_ferry.results import FailedItem, UploadReport
-from .imgbed_ferry.service import FOLDER_VARIABLES, UploadService
+from .imgbed_ferry.service import FOLDER_VARIABLES, QuotaCheck, UploadService
 from .imgbed_ferry.session import SessionMaterials
 from .imgbed_ferry.store import SCOPE_GROUP, SCOPE_USER, FerryStore
 from .imgbed_ferry.tools import TOOL_CLASSES
 
 PLUGIN_ID = "astrbot_plugin_imgbed_ferry"
 PLUGIN_NAME = "图床摆渡"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_imgbed_ferry"
 
 #: 取件目标，和 `imgbed_upload` 工具的 `target` 枚举保持一致。
@@ -125,6 +128,9 @@ class ImgBedFerryPlugin(Star):
         self.service = UploadService(self.config, self.client, self.store)
         #: session_id -> 上一批一起出现的素材 id，用于「隔一句话再说上传」时精确复原。
         self._recent_batch: dict[str, list[str]] = {}
+        #: 跨插件上传在真正发起 HTTP 请求前预留的配额，避免并发请求绕过上限。
+        self._asset_quota_lock = asyncio.Lock()
+        self._asset_quota_reserved: dict[tuple[str, str], int] = {}
         self._tool_names: list[str] = []
         self._register_tools()
         if not self.config.endpoint.configured:
@@ -285,11 +291,21 @@ class ImgBedFerryPlugin(Star):
     # 权限与配额
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _event_value(event: Any, method_name: str) -> str:
+        method = getattr(event, method_name, None)
+        if not callable(method):
+            return ""
+        try:
+            return str(method() or "")
+        except Exception:
+            return ""
+
     def _permission_denied(self, event: AstrMessageEvent, *, need_admin: bool = False) -> str:
         """返回空串表示放行，否则返回可以直接展示给用户的拒绝原因。"""
         perm = self.config.permission
-        user_id = str(getattr(event, "get_sender_id", lambda: "")() or "")
-        group_id = str(getattr(event, "get_group_id", lambda: "")() or "")
+        user_id = self._event_value(event, "get_sender_id")
+        group_id = self._event_value(event, "get_group_id")
         if user_id and user_id in perm.user_blacklist:
             return "你不在图床摆渡的可用名单里。"
         if group_id:
@@ -317,25 +333,78 @@ class ImgBedFerryPlugin(Star):
             return ""
         if self._is_admin(event):
             return ""
-        if perm.daily_quota_per_user > 0:
-            user_id = str(event.get_sender_id() or "")
-            if user_id:
-                used = await self.store.quota_used(SCOPE_USER, user_id)
-                if used + count > perm.daily_quota_per_user:
-                    return (
-                        f"你今天的图床额度不够了：已用 {used}/{perm.daily_quota_per_user}，"
-                        f"这次还要 {count} 个。额度每天 0 点重置。"
-                    )
-        if perm.daily_quota_per_group > 0:
-            group_id = str(event.get_group_id() or "")
-            if group_id:
-                used = await self.store.quota_used(SCOPE_GROUP, group_id)
-                if used + count > perm.daily_quota_per_group:
-                    return (
-                        f"本群今天的图床额度不够了：已用 {used}/{perm.daily_quota_per_group}，"
-                        f"这次还要 {count} 个。额度每天 0 点重置。"
-                    )
+        async with self._asset_quota_state()[0]:
+            for scope, key, limit in self._quota_scopes(event):
+                used = await self.store.quota_used(scope, key)
+                pending = self._asset_quota_state()[1].get((scope, key), 0)
+                if used + pending + count > limit:
+                    return self._quota_message(scope, used + pending, limit, count)
         return ""
+
+    def _asset_quota_state(self) -> tuple[asyncio.Lock, dict[tuple[str, str], int]]:
+        """取得跨插件配额预留状态；兼容单测里绕过 ``__init__`` 构造的实例。"""
+        lock = getattr(self, "_asset_quota_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._asset_quota_lock = lock
+        reserved = getattr(self, "_asset_quota_reserved", None)
+        if reserved is None:
+            reserved = {}
+            self._asset_quota_reserved = reserved
+        return lock, reserved
+
+    def _quota_scopes(self, event: Any) -> list[tuple[str, str, int]]:
+        perm = self.config.permission
+        scopes: list[tuple[str, str, int]] = []
+        user_id = self._event_value(event, "get_sender_id")
+        group_id = self._event_value(event, "get_group_id")
+        if perm.daily_quota_per_user > 0 and user_id:
+            scopes.append((SCOPE_USER, user_id, perm.daily_quota_per_user))
+        if perm.daily_quota_per_group > 0 and group_id:
+            scopes.append((SCOPE_GROUP, group_id, perm.daily_quota_per_group))
+        return scopes
+
+    @staticmethod
+    def _quota_message(scope: str, used: int, limit: int, count: int) -> str:
+        if scope == SCOPE_GROUP:
+            return f"本群今天的图床额度不够了：已用 {used}/{limit}，这次还要 {count} 个。额度每天 0 点重置。"
+        return (
+            f"你今天的图床额度不够了：已用 {used}/{limit}，这次还要 {count} 个。额度每天 0 点重置。"
+        )
+
+    async def _reserve_asset_quota(self, event: Any, count: int = 1) -> str:
+        """只在服务确认「要新传」时预留额度；命中去重不会调用此方法。"""
+        if count <= 0 or self._is_admin(event):
+            return ""
+        perm = self.config.permission
+        if perm.daily_quota_per_user <= 0 and perm.daily_quota_per_group <= 0:
+            return ""
+        lock, reserved = self._asset_quota_state()
+        scopes = self._quota_scopes(event)
+        async with lock:
+            for scope, key, limit in scopes:
+                used = await self.store.quota_used(scope, key)
+                pending = reserved.get((scope, key), 0)
+                if used + pending + count > limit:
+                    return self._quota_message(scope, used + pending, limit, count)
+            for scope, key, _ in scopes:
+                reservation_key = (scope, key)
+                reserved[reservation_key] = reserved.get(reservation_key, 0) + count
+        return ""
+
+    async def _release_asset_quota(self, event: Any, count: int = 1) -> None:
+        if count <= 0:
+            return
+        _, reserved = self._asset_quota_state()
+        scopes = self._quota_scopes(event)
+        async with self._asset_quota_state()[0]:
+            for scope, key, _ in scopes:
+                reservation_key = (scope, key)
+                remaining = reserved.get(reservation_key, 0) - count
+                if remaining > 0:
+                    reserved[reservation_key] = remaining
+                else:
+                    reserved.pop(reservation_key, None)
 
     async def _charge(self, event: AstrMessageEvent, report: UploadReport) -> None:
         """只对真正占用了图床空间的文件计数，命中去重复用的不算。
@@ -346,12 +415,13 @@ class ImgBedFerryPlugin(Star):
         if billed <= 0:
             return
         try:
-            user_id = str(event.get_sender_id() or "")
-            if user_id:
-                await self.store.quota_add(SCOPE_USER, user_id, billed)
-            group_id = str(event.get_group_id() or "")
-            if group_id:
-                await self.store.quota_add(SCOPE_GROUP, group_id, billed)
+            async with self._asset_quota_state()[0]:
+                user_id = self._event_value(event, "get_sender_id")
+                if user_id:
+                    await self.store.quota_add(SCOPE_USER, user_id, billed)
+                group_id = self._event_value(event, "get_group_id")
+                if group_id:
+                    await self.store.quota_add(SCOPE_GROUP, group_id, billed)
         except Exception as exc:
             logger.debug("[%s] 写入配额计数失败：%s", PLUGIN_NAME, exc)
 
@@ -369,6 +439,7 @@ class ImgBedFerryPlugin(Star):
         name_type: str = "",
         extract: bool | None = None,
         compress: bool | None = None,
+        quota_check: QuotaCheck | None = None,
     ) -> UploadReport:
         """指令与 LLM 工具共用的上传出口，永远返回 report。"""
         if materials:
@@ -379,6 +450,7 @@ class ImgBedFerryPlugin(Star):
                 name_type=name_type,
                 extract=extract,
                 compress=compress,
+                quota_check=quota_check,
             )
         else:
             report = UploadReport()
@@ -392,6 +464,107 @@ class ImgBedFerryPlugin(Star):
             )
         await self._charge(event, report)
         return report
+
+    async def upload_asset(
+        self,
+        event: Any,
+        asset: Any,
+        folder: str = "",
+        compress: bool | None = None,
+        output_format: str = "",
+    ) -> dict[str, Any]:
+        """供其它 AstrBot 插件调用的受控资源上传接口。
+
+        ``asset`` 必须是带来源、短 TTL、大小和 SHA-256 的资源句柄（例如
+        meme_magpie 的 ``MemeAssetHandle``），不能传裸本地路径。接口不经过
+        LLM 工具，也不修改/删除提供方源文件；返回值始终是可 JSON 序列化的
+        字典，方便 AstrBook 等消费者直接拼接 Markdown。
+        """
+        integration = self.config.integration
+        if not integration.enabled:
+            return self._json_asset_error("跨插件资源上传已被管理员关闭。", "integration_disabled")
+        if not self.config.endpoint.configured:
+            return self._json_asset_error("图床地址未配置。", "not_configured")
+
+        denied = self._permission_denied(event)
+        if denied:
+            return self._json_asset_error(denied, "forbidden")
+
+        try:
+            handle = parse_asset_handle(
+                asset,
+                allowed_sources=integration.allowed_asset_sources,
+                max_ttl_seconds=integration.max_handle_ttl_seconds,
+                max_bytes=self.config.upload.max_file_bytes,
+                require_declared_hash=integration.require_declared_hash,
+            )
+            data = await handle.read_bytes()
+        except AssetValidationError as exc:
+            return self._json_asset_error(exc.message, exc.code)
+        except Exception as exc:
+            logger.debug("[%s] 读取跨插件资源失败：%s", PLUGIN_NAME, exc)
+            return self._json_asset_error("读取受控资源失败。", "invalid_asset")
+
+        material = Material(
+            kind=KIND_IMAGE,
+            name=handle.name,
+            source=handle.source,
+            data=data,
+            size=len(data),
+            mime=handle.mime,
+            material_id=handle.asset_id,
+        )
+        try:
+            report = await self._run_upload(
+                event,
+                materials=[material],
+                folder=str(folder or ""),
+                compress=compress if isinstance(compress, bool) else None,
+                quota_check=lambda: self._reserve_asset_quota(event),
+            )
+        finally:
+            # 真实上传完成后 ``_charge`` 已经记账；失败、取消和缓存命中则只会
+            # 释放本次临时预留，不会凭空增加配额用量。
+            await self._release_asset_quota(event)
+        if not report.items:
+            failure = report.failures[0] if report.failures else None
+            return self._json_asset_error(
+                failure.describe() if failure else "上传失败。",
+                (failure.code if failure and failure.code else "upload_failed"),
+                details=failure.to_dict() if failure else None,
+            )
+
+        item = report.items[0]
+        style = normalize_style(output_format, self.config.behavior.output_format)
+        formatted = format_item(item, style, show_size=False)
+        result: dict[str, Any] = {
+            "success": True,
+            "url": item.url,
+            "file_id": item.file_id,
+            "sha256": item.digest,
+            "reused": bool(item.reused),
+            "name": item.name,
+            "size": item.size,
+            "original_size": item.original_size or item.size,
+            "output_format": style,
+            "formatted": formatted,
+            "text": formatted,
+            "markdown": format_link(item.url, item.name, "markdown", image=True),
+            "asset_id": handle.asset_id,
+            "source": handle.source,
+        }
+        if report.notes:
+            result["notes"] = list(report.notes)
+        return result
+
+    @classmethod
+    def _json_asset_error(
+        cls, message: str, code: str, *, details: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {"success": False, "code": code, "error": message}
+        if details:
+            result["details"] = details
+        return result
 
     # ------------------------------------------------------------------
     # 输出

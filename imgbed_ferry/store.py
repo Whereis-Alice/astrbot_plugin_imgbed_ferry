@@ -109,13 +109,27 @@ class FerryStore:
             for digest, _ in ordered[:overflow]:
                 self._dedupe.pop(digest, None)
 
-    async def lookup(self, digest: str) -> dict[str, Any] | None:
-        """按内容 sha256 查已上传过的 URL。"""
+    async def lookup(self, digest: str, *, fingerprint: str = "") -> dict[str, Any] | None:
+        """查找去重记录。
+
+        新版本以 ``fingerprint``（最终内容 + 上传上下文）作为索引，避免同一
+        图片被错误地复用到不同目录或不同压缩策略。省略 fingerprint 时仍按
+        旧版 digest key 查询，给历史 KV 和现有调用方保留兼容性。
+        """
         if not self._behavior.dedupe_enabled or not digest:
             return None
         async with self._lock:
             await self._ensure_loaded()
-            entry = self._dedupe.get(digest)
+            key = str(fingerprint or digest)
+            entry = self._dedupe.get(key)
+            # 新调用不能把没有上下文的旧 digest 记录误用到任意目录；只有
+            # 明确省略 fingerprint 的旧式调用才走上面的兼容路径。
+            if (
+                fingerprint
+                and entry is not None
+                and str(entry.get("fingerprint") or "") != str(fingerprint)
+            ):
+                entry = None
             if not entry or not entry.get("url"):
                 return None
             ttl_days = max(0, int(self._behavior.dedupe_ttl_days))
@@ -125,7 +139,7 @@ class FerryStore:
                 except (TypeError, ValueError):
                     stamp = 0.0
                 if stamp < time.time() - ttl_days * 86400:
-                    self._dedupe.pop(digest, None)
+                    self._dedupe.pop(key, None)
                     return None
             return dict(entry)
 
@@ -133,32 +147,65 @@ class FerryStore:
         self,
         digest: str,
         *,
+        fingerprint: str = "",
         url: str,
         file_id: str = "",
         name: str = "",
         size: int = 0,
+        original_size: int = 0,
+        folder: str = "",
+        compression: Any = None,
+        endpoint: str = "",
     ) -> None:
         if not self._behavior.dedupe_enabled or not digest or not url:
             return
         async with self._lock:
             await self._ensure_loaded()
-            self._dedupe[digest] = {
+            key = str(fingerprint or digest)
+            entry: dict[str, Any] = {
+                "digest": str(digest),
+                "fingerprint": str(fingerprint or ""),
                 "url": url,
                 "file_id": file_id,
                 "name": name,
                 "size": int(size),
                 "ts": time.time(),
             }
+            if original_size:
+                entry["original_size"] = int(original_size)
+            if folder:
+                entry["folder"] = str(folder)
+            if compression is not None:
+                entry["compression"] = compression
+            if endpoint:
+                entry["endpoint"] = str(endpoint)
+            self._dedupe[key] = entry
             self._prune_dedupe()
             await self._kv_put(KEY_DEDUPE, dict(self._dedupe))
 
-    async def drop(self, digest: str) -> None:
+    async def drop(self, digest: str, *, fingerprint: str = "") -> None:
         """删除图床上的文件后要把去重项一起撤掉，否则会返回死链。"""
         if not digest:
             return
         async with self._lock:
             await self._ensure_loaded()
-            if self._dedupe.pop(digest, None) is not None:
+            keys: list[str] = []
+            if fingerprint and fingerprint in self._dedupe:
+                keys.append(fingerprint)
+            elif not fingerprint and digest in self._dedupe:
+                keys.append(digest)
+            # 一个最终 digest 可能对应多个目录/配置，按 digest 删除时全部清理；
+            # 这是管理员删除文件后最不容易留下死链的行为。
+            if not fingerprint:
+                keys.extend(
+                    key
+                    for key, entry in self._dedupe.items()
+                    if key not in keys and str(entry.get("digest") or "") == str(digest)
+                )
+            removed = False
+            for key in keys:
+                removed = self._dedupe.pop(key, None) is not None or removed
+            if removed:
                 await self._kv_put(KEY_DEDUPE, dict(self._dedupe))
 
     async def drop_by_file_id(self, file_id: str) -> int:
@@ -168,12 +215,12 @@ class FerryStore:
         async with self._lock:
             await self._ensure_loaded()
             removed = [
-                digest
-                for digest, entry in self._dedupe.items()
+                key
+                for key, entry in self._dedupe.items()
                 if str(entry.get("file_id") or "") == text
             ]
-            for digest in removed:
-                self._dedupe.pop(digest, None)
+            for key in removed:
+                self._dedupe.pop(key, None)
             if removed:
                 await self._kv_put(KEY_DEDUPE, dict(self._dedupe))
             return len(removed)

@@ -163,6 +163,37 @@ HuggingFace Storage Buckets 走的是 **S3 兼容协议**，所以：
 每个工具都能在 `permission` 分组里单独关掉，也可以用 `permission.llm_tools_enabled` 一键全关，
 只留指令。工具的返回值里带了明确的转达要求（原样输出链接、不要编造），尽量压掉模型幻觉。
 
+### 给其它插件调用（AstrBook / meme_magpie）
+
+插件还提供一个不经过 LLM 的异步方法 `upload_asset()`。它只接受合作插件签发的受控资源句柄，
+不接受模型传入的裸本地路径；句柄会在读取时再次校验有效期、大小、SHA-256 和图片文件签名。
+源文件由提供方管理，上传成功或发帖失败都不会被本插件删除。
+
+AstrBot 中可通过注册表取得插件实例：
+
+```python
+meta = self.context.get_registered_star("astrbot_plugin_imgbed_ferry")
+ferry = (getattr(meta, "star_cls", None) or getattr(meta, "star", None)) if meta else None
+if ferry is not None:
+    result = await ferry.upload_asset(
+        event,
+        asset,  # meme_magpie.export_meme_asset() 返回的句柄
+        folder="astrbook/memes",
+        compress=True,
+        output_format="markdown",
+    )
+```
+
+成功结果至少包含 `success=true`、`url`、`sha256` 和 `reused`，并额外提供 `markdown`、
+`formatted`、`file_id`、`name`、`size`、`original_size` 等字段；`reused=true` 表示命中了
+相同图床配置、目录、命名方式、压缩策略和最终内容的缓存，没有再次占用图床空间。失败结果包含
+稳定的 `code`（例如 `asset_expired`、`invalid_signature`、`too_large`、`quota_exceeded`、
+`upload_failed`）和可展示的 `error`。
+
+`meme_magpie` 的句柄提供 `provider`、`api_version`、`asset_id`、`filename`、`mime_type`、
+`size`、`sha256`、`created_at`、`expires_at` 与异步 `read_bytes()`；不要从对象内部寻找或传递
+本地路径。完整协议与错误处理示例见 [`docs/integration.md`](docs/integration.md)。
+
 ### 目录模板变量
 
 `upload.folder_template` 和 `-f` 参数都支持：
@@ -279,9 +310,19 @@ HuggingFace Storage Buckets 走的是 **S3 兼容协议**，所以：
 | `daily_quota_per_user` | `0` | 每人每日文件数上限，0 = 不限 |
 | `daily_quota_per_group` | `0` | 每群每日文件数上限，0 = 不限 |
 
+### `integration` · 跨插件资源句柄
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 是否开放 `upload_asset()` |
+| `allowed_asset_sources` | `["astrbot_plugin_meme_magpie"]` | 信任的句柄来源白名单 |
+| `max_handle_ttl_seconds` | `1800` | 接受的句柄最大有效期 |
+| `require_declared_hash` | `true` | 是否要求句柄声明 SHA-256，推荐开启 |
+
 `debug`（顶层，默认 `false`）打开后会输出取件与上传的详细日志，排查「文件段拿不到」时很有用。
 
 配额只统计**真正上传**的文件，命中去重复用旧链接的不计数；管理员不受每日配额限制。
+跨插件 `upload_asset()` 也遵循这条规则：先查到可复用链接时不会因为额度已用尽而拒绝；只有确认要发起新上传时才预留并扣除 1 个额度。
 ---
 
 ## 顺手做的那些事

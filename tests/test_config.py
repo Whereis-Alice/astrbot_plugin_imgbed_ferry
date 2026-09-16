@@ -242,6 +242,7 @@ class SchemaConsistencyTest(unittest.TestCase):
             "archive": FerryConfig().archive,
             "behavior": FerryConfig().behavior,
             "permission": FerryConfig().permission,
+            "integration": FerryConfig().integration,
         }
         for name, block in expected.items():
             with self.subTest(section=name):

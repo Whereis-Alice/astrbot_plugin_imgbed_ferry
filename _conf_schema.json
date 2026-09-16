@@ -358,7 +358,8 @@
         "default": false
       }
     }
-  },  "permission": {
+  },
+  "permission": {
     "type": "object",
     "description": "权限与配额",
     "hint": "谁能用、能用哪些工具、每天能传多少。图床空间是公共资源，群聊场景建议按需收紧。",
@@ -439,6 +440,38 @@
         "hint": "0 表示不限制。",
         "default": 0,
         "slider": {"min": 0, "max": 5000, "step": 10}
+      }
+    }
+  },
+  "integration": {
+    "type": "object",
+    "description": "跨插件资源句柄",
+    "hint": "供 meme_magpie、AstrBook 等合作插件安全传递图片；不接受裸本地路径。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用跨插件资源上传接口",
+        "hint": "关闭后其它插件不能调用 upload_asset，但消息附件和 LLM 工具不受影响。",
+        "default": true
+      },
+      "allowed_asset_sources": {
+        "type": "list",
+        "description": "允许的资源句柄来源",
+        "hint": "默认只信任 astrbot_plugin_meme_magpie；来源必须与句柄 provider 一致。",
+        "default": ["astrbot_plugin_meme_magpie"]
+      },
+      "max_handle_ttl_seconds": {
+        "type": "int",
+        "description": "资源句柄最大有效期（秒）",
+        "hint": "句柄过期后必须由提供方重新导出；建议保持短 TTL。",
+        "default": 1800,
+        "slider": {"min": 30, "max": 86400, "step": 30}
+      },
+      "require_declared_hash": {
+        "type": "bool",
+        "description": "要求句柄声明 SHA-256",
+        "hint": "开启可防止提供方文件在导出后被替换，推荐保持开启。",
+        "default": true
       }
     }
   },

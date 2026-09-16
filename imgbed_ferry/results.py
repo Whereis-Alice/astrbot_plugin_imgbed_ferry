@@ -20,6 +20,7 @@ class UploadedItem:
     original_size: int = 0
     file_id: str = ""
     digest: str = ""
+    fingerprint: str = ""
     kind: str = "file"
     source: str = ""
     archive: str = ""
@@ -34,6 +35,12 @@ class UploadedItem:
         data: dict[str, Any] = {"name": self.name, "url": self.url, "size": self.size}
         if self.file_id:
             data["file_id"] = self.file_id
+        if self.digest:
+            data["sha256"] = self.digest
+        if self.original_size and self.original_size != self.size:
+            data["original_size"] = self.original_size
+        if self.fingerprint:
+            data["fingerprint"] = self.fingerprint
         if self.archive:
             data["from_archive"] = self.archive
         if self.reused:
@@ -50,6 +57,7 @@ class FailedItem:
     name: str
     reason: str
     hint: str = ""
+    code: str = ""
 
     def describe(self) -> str:
         return f"{self.reason}（{self.hint}）" if self.hint else self.reason
@@ -58,6 +66,8 @@ class FailedItem:
         data = {"name": self.name, "reason": self.reason}
         if self.hint:
             data["hint"] = self.hint
+        if self.code:
+            data["code"] = self.code
         return data
 
 

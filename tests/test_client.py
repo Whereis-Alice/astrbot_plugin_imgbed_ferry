@@ -412,6 +412,15 @@ class ClientUploadTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("authCode", transport.last["params"])
         self.assertEqual(transport.last["headers"], {"authCode": "secret"})
 
+    async def test_upload_adds_optional_idempotency_header(self) -> None:
+        transport = FakeTransport(ok([{"src": "/file/a.png"}]))
+        client = ImgBedClient(endpoint(), transport=transport)
+        await client.upload(filename="a.png", data=b"1", idempotency_key="stable-key")
+        self.assertEqual(
+            transport.last["headers"],
+            {"Authorization": "Bearer tok-abc", "Idempotency-Key": "stable-key"},
+        )
+
     async def test_upload_error_status_is_classified(self) -> None:
         transport = FakeTransport(RawResponse(413, "Error: file too large"))
         client = ImgBedClient(endpoint(), transport=transport)
